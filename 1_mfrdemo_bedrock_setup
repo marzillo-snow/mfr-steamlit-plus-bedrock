@@ -1,0 +1,140 @@
+use role ACCOUNTADMIN;
+use database MFR_DEMO;
+
+--create object with aws keys
+CREATE OR REPLACE SECRET aws_keys
+    TYPE = password
+    USERNAME = '<aws id>'
+    PASSWORD = '<aws key>';
+
+
+CREATE OR REPLACE SECRET session_key
+    TYPE = password
+    USERNAME = 'session'
+    PASSWORD = '<aws token>';
+
+--create network rule
+create or replace network rule aws_network_rule
+mode = EGRESS
+type = HOST_PORT
+value_list = ('bedrock-runtime.<region>.amazonaws.com');
+
+--create external access integration
+create or replace EXTERNAL ACCESS INTEGRATION aws_integration
+allowed_network_rules = (aws_network_rule)
+ALLOWED_AUTHENTICATION_SECRETS = (aws_keys, session_key)
+enabled=true;
+
+--create function to call bedrock
+create or replace function ask_bedrock(llm_instructions string, model string)
+returns string
+language python
+runtime_version=3.8
+handler = 'ask_bedrock'
+external_access_integrations=(aws_integration)
+SECRETS = ('aws_keys' = aws_keys, 'session_key' = session_key)
+PACKAGES = ('boto3')
+as
+$$
+import json
+import boto3
+import _snowflake
+
+# Function to get AWS credentials
+def get_aws_credentials():
+    aws_key_object = _snowflake.get_username_password('aws_keys')
+    session_key_object = _snowflake.get_username_password('session_key')
+    region = 'us-west-2'
+
+    boto3_session_args = {
+        'aws_access_key_id': aws_key_object.username,
+        'aws_secret_access_key': aws_key_object.password,
+        'region_name': region
+    }
+
+    if session_key_object.password != '':
+        boto3_session_args['aws_session_token'] = session_key_object.password
+
+    return boto3_session_args, region
+
+# Function to prepare the request body based on the model
+def prepare_request_body(model_id, instructions):
+    default_max_tokens = 512
+    default_temperature = 0.7
+    default_top_p = 1.0
+
+    if model_id == 'amazon.titan-tg1-large':
+        body = {
+            "inputText": instructions,
+            "textGenerationConfig": {
+                "maxTokenCount": default_max_tokens,
+                "stopSequences": [],
+                "temperature": default_temperature,
+                "topP": default_top_p
+            }
+        }
+    elif model_id == 'ai21.j2-ultra-v1':
+        body = {
+            "prompt": instructions,
+            "temperature": default_temperature,
+            "topP": default_top_p,
+            "maxTokens": default_max_tokens
+        }
+    elif model_id == 'anthropic.claude-v2:1':
+        body = {
+            "prompt": f"\n\nHuman:{instructions}\n\nAssistant:",
+            "max_tokens_to_sample": default_max_tokens,
+            "temperature": default_temperature,
+            "top_p": default_top_p,
+            "stop_sequences": ["\n\nHuman:"]
+        }
+    else:
+        raise ValueError("Unsupported model ID")
+
+    return json.dumps(body)
+
+# parse API response format from different model families in Bedrock
+# users will likely want to update the model options with newest models available 
+def get_completion_from_response(response_body, model_id):
+    if model_id == 'amazon.titan-tg1-large':
+        output_text = response_body.get('results')[0].get('outputText')
+    elif model_id == 'ai21.j2-ultra-v1':
+        output_text = response_body.get('completions')[0].get('data').get('text')
+    elif model_id == 'anthropic.claude-v2:1':
+        output_text = response_body.get('completion')
+    else:
+        raise ValueError("Unsupported model ID")
+    return output_text
+
+# Main function to call bedrock
+def ask_bedrock(instructions, model):
+    boto3_session_args, region = get_aws_credentials()
+
+    # Create a session using the provided credentials
+    session = boto3.Session(**boto3_session_args)
+
+    # Create a bedrock client from session
+    client = session.client('bedrock-runtime', region_name=region)
+
+    # Prepare the request body based on the model
+    body = prepare_request_body(model, instructions)
+
+    response = client.invoke_model(modelId=model, body=body)
+    response_body = json.loads(response.get('body').read())
+
+    output_text = get_completion_from_response(response_body, model)
+    return output_text
+$$;
+
+SET DEFAULT_LLM_INSTRUCTIONS = 'who is the greatest basketball player of all time?';
+SET DEFAULT_MODEL = 'amazon.titan-tg1-large';
+
+select ask_bedrock($DEFAULT_LLM_INSTRUCTIONS, $DEFAULT_MODEL);
+
+
+
+
+
+
+
+
