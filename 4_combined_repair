@@ -1,0 +1,55 @@
+--    _____           _     ____                     
+--   |  __ \         | |   |___ \ _                  
+--   | |__) __ _ _ __| |_    __) (_)                 
+--   |  ___/ _` | '__| __|  |__ <                    
+--   | |  | (_| | |  | |_   ___) |_                  
+--   |_|   \__,_|_|   \__| |____/(_)                 
+--     _____                _     _                _ 
+--    / ____|              | |   (_)              | |
+--   | |     ___  _ __ ___ | |__  _ _ __   ___  __| |
+--   | |    / _ \| '_ ` _ \| '_ \| | '_ \ / _ \/ _` |
+--   | |___| (_) | | | | | | |_) | | | | |  __| (_| |
+--    \_____\___/|_| |_| |_|_.__/|_|_| |_|\___|\__,_|
+--                                                   
+--                                                   
+
+----------------------------------------------------------------------
+-- Run both LLMs, combine the contents, and ask Snowflake Cortex to summarize
+----------------------------------------------------------------------  
+CREATE OR REPLACE FUNCTION COMBINED_REPAIR_LLM(prompt string)
+RETURNS TABLE (response string)
+AS
+    $$
+       WITH stacked_results AS
+        (
+            SELECT TOP 1 response FROM TABLE(REPAIR_MANUALS_LLM(prompt)) 
+            UNION
+            SELECT response FROM TABLE(REPAIR_LOGS_LLM(prompt))
+        ),
+        collapsed_results AS (
+            SELECT 
+                LISTAGG(response) AS collapsed_text 
+            FROM 
+                stacked_results
+        )
+        SELECT
+            SNOWFLAKE.CORTEX.SUMMARIZE(collapsed_text) AS response
+        FROM
+            collapsed_results
+    $$;
+
+    
+----------------------------------------------------------------------
+-- Test the combined function
+----------------------------------------------------------------------  
+SET prompt = 'Otto 100 lights are not working.  How do I repair?';--'OTTO 1500 agv is not driving straight.  How do I troubleshoot and resolve this issue?';
+
+SELECT * FROM TABLE(COMBINED_REPAIR_LLM($prompt));
+
+
+--    ____  _                            _ _ _     ____                       _ 
+--   / ___|| |_ _ __ ___  __ _ _ __ ___ | (_| |_  |  _ \  ___ _ __ ___   ___ | |
+--   \___ \| __| '__/ _ \/ _` | '_ ` _ \| | | __| | | | |/ _ | '_ ` _ \ / _ \| |
+--    ___) | |_| | |  __| (_| | | | | | | | | |_  | |_| |  __| | | | | | (_) |_|
+--   |____/ \__|_|  \___|\__,_|_| |_| |_|_|_|\__| |____/ \___|_| |_| |_|\___/(_)
+--                                                                              
