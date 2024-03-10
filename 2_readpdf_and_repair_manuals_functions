@@ -1,0 +1,151 @@
+
+----------------------------------------------------------------------
+-- Stage the PDF repair manauls
+----------------------------------------------------------------------
+LIST @repair_manuals;
+
+----------------------------------------------------------------------
+-- Create a python function to parse PDF files
+----------------------------------------------------------------------  
+CREATE OR REPLACE FUNCTION py_read_pdf(file string)
+    returns string
+    language python
+    runtime_version = 3.8
+    packages = ('snowflake-snowpark-python','pypdf2')
+    handler = 'read_file'
+as
+$$
+from PyPDF2 import PdfFileReader
+from snowflake.snowpark.files import SnowflakeFile
+from io import BytesIO
+def read_file(file_path):
+    whole_text = ""
+    with SnowflakeFile.open(file_path, 'rb') as file:
+        f = BytesIO(file.readall())
+        pdf_reader = PdfFileReader(f)
+        whole_text = ""
+        for page in pdf_reader.pages:
+            whole_text += page.extract_text()
+    return whole_text
+$$;
+
+----------------------------------------------------------------------
+-- Create a table for storing the text parsed from each PDF
+----------------------------------------------------------------------  
+CREATE OR REPLACE TABLE repair_manuals AS
+    WITH filenames AS (SELECT DISTINCT METADATA$FILENAME AS file_name FROM @repair_manuals)
+    SELECT 
+        file_name, 
+        py_read_pdf(build_scoped_file_url(@repair_manuals, file_name)) AS contents
+    FROM filenames;
+
+SELECT * FROM repair_manuals;
+
+
+----------------------------------------------------------------------
+-- Chunk the file contents into 5000 character chunks, overlap each
+-- chunk by 1000 characaters.
+----------------------------------------------------------------------
+SET chunk_size = 5000;
+SET overlap = 1000;
+CREATE OR REPLACE TABLE repair_manuals_chunked AS 
+WITH RECURSIVE split_contents AS (
+    SELECT 
+        file_name,
+        SUBSTRING(contents, 1, $chunk_size) AS chunk_text,
+        SUBSTRING(contents, $chunk_size-$overlap) AS remaining_contents,
+        1 AS chunk_number
+    FROM 
+        repair_manuals
+
+    UNION ALL
+
+    SELECT 
+        file_name,
+        SUBSTRING(remaining_contents, 1, $chunk_size),
+        SUBSTRING(remaining_contents, $chunk_size-$overlap),
+        chunk_number + 1
+    FROM 
+        split_contents
+    WHERE 
+        LENGTH(remaining_contents) > 0
+)
+SELECT 
+    file_name,
+    chunk_number,
+    chunk_text,
+    CONCAT(
+        'Sampled contents from repair manual [', 
+        file_name,
+        ']: ', 
+        chunk_text
+    ) AS combined_chunk_text
+FROM 
+    split_contents
+ORDER BY 
+    file_name,
+    chunk_number;
+
+SELECT LEN(chunk_text), * FROM repair_manuals_chunked order by file_name, chunk_number ASC;
+
+
+----------------------------------------------------------------------
+-- "Vectorize" the chunked text into a language encoded representation
+----------------------------------------------------------------------  
+CREATE OR REPLACE TABLE repair_manuals_chunked_vectors AS 
+SELECT 
+    file_name, 
+    chunk_number, 
+    chunk_text, 
+    combined_chunk_text,
+    snowflake.cortex.embed_text('e5-base-v2', combined_chunk_text) as combined_chunk_vector
+FROM 
+    repair_manuals_chunked;
+    
+SELECT * FROM repair_manuals_chunked_vectors;
+
+
+----------------------------------------------------------------------
+-- Invoke an LLM, sending our question as part of the prompt along with 
+-- additional "context" from the best matching chunk (based on cosine similarity)
+----------------------------------------------------------------------  
+
+CREATE OR REPLACE FUNCTION REPAIR_MANUALS_LLM(prompt string)
+RETURNS TABLE (response string, file_name string, chunk_text string, chunk_number int, score float)
+AS
+    $$
+    WITH best_match_chunk AS (
+        SELECT
+            v.file_name,
+            v.chunk_number,
+            v.chunk_text,
+            VECTOR_COSINE_DISTANCE(v.combined_chunk_vector, snowflake.cortex.embed_text('e5-base-v2', prompt)) AS score
+        FROM 
+            repair_manuals_chunked_vectors v
+        ORDER BY 
+            score DESC
+        LIMIT 10
+    )
+    SELECT 
+        ask_bedrock(
+            CONCAT('Answer this question: ', prompt, '\n\nUsing this repair manual text: ', chunk_text), 'anthropic.claude-v2:1
+        ) AS response,
+        file_name,
+        chunk_text,
+        chunk_number,
+        score
+    FROM
+        best_match_chunk
+    $$;
+
+-- Test the LLM:
+SET prompt = 'OTTO 1500 agv is not driving straight.  How do I troubleshoot and resolve this issue?';
+SELECT * FROM TABLE(REPAIR_MANUALS_LLM($prompt));
+
+
+--    ____  _                            _ _ _     ____                       _ 
+--   / ___|| |_ _ __ ___  __ _ _ __ ___ | (_| |_  |  _ \  ___ _ __ ___   ___ | |
+--   \___ \| __| '__/ _ \/ _` | '_ ` _ \| | | __| | | | |/ _ | '_ ` _ \ / _ \| |
+--    ___) | |_| | |  __| (_| | | | | | | | | |_  | |_| |  __| | | | | | (_) |_|
+--   |____/ \__|_|  \___|\__,_|_| |_| |_|_|_|\__| |____/ \___|_| |_| |_|\___/(_)
+--                                                  
