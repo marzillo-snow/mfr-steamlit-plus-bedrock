@@ -13,12 +13,11 @@ CREATE OR REPLACE SECRET session_key
     USERNAME = 'session'
     PASSWORD = ''; -- if not using a session key, leave this blank and it won't be used later
 
---create network rule - select your AWS region here
+--create network rule
 create or replace network rule aws_network_rule
 mode = EGRESS
 type = HOST_PORT
-value_list = ('bedrock-runtime.<AWS Region - e.g. us-west-2>.amazonaws.com');
-
+value_list = ('bedrock-runtime.us-west-2.amazonaws.com');
 
 --create external access integration
 create or replace EXTERNAL ACCESS INTEGRATION aws_integration
@@ -26,7 +25,8 @@ allowed_network_rules = (aws_network_rule)
 ALLOWED_AUTHENTICATION_SECRETS = (aws_keys, session_key)
 enabled=true;
 
-create or replace function ask_bedrock(llm_instructions string, user_context_prompt string, model string)
+--create function to call bedrock
+create or replace function ask_bedrock(llm_instructions string, model string)
 returns string
 language python
 runtime_version=3.8
@@ -58,14 +58,14 @@ def get_aws_credentials():
     return boto3_session_args, region
 
 # Function to prepare the request body based on the model
-def prepare_request_body(model_id, instructions, user_context):
+def prepare_request_body(model_id, instructions):
     default_max_tokens = 512
     default_temperature = 0.7
     default_top_p = 1.0
 
-    if model_id == 'amazon.titan-text-express-v1':
+    if model_id == 'amazon.titan-tg1-large':
         body = {
-            "inputText": f"<SYSTEM>Follow these:{instructions}<END_SYSTEM>\n<USER_CONTEXT>Use this user context in your response:{user_context}<END_USER_CONTEXT>",
+            "inputText": instructions,
             "textGenerationConfig": {
                 "maxTokenCount": default_max_tokens,
                 "stopSequences": [],
@@ -75,15 +75,15 @@ def prepare_request_body(model_id, instructions, user_context):
         }
     elif model_id == 'ai21.j2-ultra-v1':
         body = {
-            "prompt": f"<SYSTEM>Follow these:{instructions}<END_SYSTEM>\n<USER_CONTEXT>Use this user context in your response:{user_context}<END_USER_CONTEXT>",
+            "prompt": instructions,
             "temperature": default_temperature,
             "topP": default_top_p,
             "maxTokens": default_max_tokens
         }
     elif model_id == 'anthropic.claude-3-sonnet-20240229-v1:0':
-        body = {
+        body ={
             "max_tokens": default_max_tokens,
-            "messages": [{"role": "user", "content": f"<SYSTEM>Follow these:{instructions}<END_SYSTEM>\n<USER_CONTEXT>Use this user context in your response:{user_context}<END_USER_CONTEXT>"}],
+            "messages": [{"role": "user", "content": f"\n\nHuman:{instructions}\n\nAssistant:"}],
             "anthropic_version": "bedrock-2023-05-31"
                 }
     else:
@@ -93,7 +93,7 @@ def prepare_request_body(model_id, instructions, user_context):
 
 # parse API response format from different model families in Bedrock
 def get_completion_from_response(response_body, model_id):
-    if model_id == 'amazon.titan-text-express-v1':
+    if model_id == 'amazon.titan-tg1-large':
         output_text = response_body.get('results')[0].get('outputText')
     elif model_id == 'ai21.j2-ultra-v1':
         output_text = response_body.get('completions')[0].get('data').get('text')
@@ -104,7 +104,7 @@ def get_completion_from_response(response_body, model_id):
     return output_text
 
 # Main function to call bedrock
-def ask_bedrock(instructions, user_context, model):
+def ask_bedrock(instructions, model):
     boto3_session_args, region = get_aws_credentials()
 
     # Create a session using the provided credentials
@@ -114,7 +114,7 @@ def ask_bedrock(instructions, user_context, model):
     client = session.client('bedrock-runtime', region_name=region)
 
     # Prepare the request body based on the model
-    body = prepare_request_body(model, instructions, user_context)
+    body = prepare_request_body(model, instructions)
 
     response = client.invoke_model(modelId=model, body=body)
     response_body = json.loads(response.get('body').read())
