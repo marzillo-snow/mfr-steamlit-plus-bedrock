@@ -4,6 +4,13 @@
 ----------------------------------------------------------------------
 LIST @repair_manuals;
 
+
+
+
+
+
+
+
 ----------------------------------------------------------------------
 -- Create a python function to parse PDF files
 ----------------------------------------------------------------------  
@@ -128,7 +135,7 @@ AS
     )
     SELECT 
         ask_bedrock(
-            CONCAT('Answer this question: ', prompt, '\n\nUsing this repair manual text: ', chunk_text), 'anthropic.claude-v2:1
+            CONCAT('Answer this question: ', prompt, '\n\nUsing this repair manual text: ', chunk_text), 'anthropic.claude-3-sonnet-20240229-v1:0'
         ) AS response,
         file_name,
         chunk_text,
