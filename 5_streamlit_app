@@ -56,4 +56,4 @@ with tab3:
     combined_response = session.sql(combined_query).collect()
     
     st.subheader('Combined Recommendations:')
-    st.write(logs_response[0].RESPONSE)
+    st.write(combined_response[0].RESPONSE)
